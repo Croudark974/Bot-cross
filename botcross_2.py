@@ -5,8 +5,8 @@ Repère les nouvelles annonces, estime la marge et :
   - envoie les bonnes affaires sur Discord
 
 Install :  pip install lbc requests
-Local   :  python3 botcross.py          (boucle)
-GitHub  :  python3 botcross.py --once   (1 passage)
+Local   :  python3 botcross_2.py          (boucle)
+GitHub  :  python3 botcross_2.py --once   (1 passage)
 """
 import json, os, random, re, sys, time
 from datetime import datetime
@@ -16,8 +16,8 @@ import lbc
 
 # ========== CONFIG ==========
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
-RECHERCHES = ["moto cross", "quad"]   # une recherche par mot-clé
-PRIX_MIN, PRIX_MAX = 500, 4000
+RECHERCHES = {"moto cross": 4000, "quad": 7000}   # mot-clé : budget max (€)
+PRIX_MIN = 500
 VILLE = lbc.City(lat=50.72, lng=3.16, radius=80_000, city="Neuville-en-Ferrain")
 INTERVALLE_MIN = 15
 CYLINDREES = {"85", "125", "250", "450"}   # cylindrées gardées (motos)
@@ -43,6 +43,13 @@ HEURES_REVISION = 100         # au-delà, on prévoit une révision moteur
 COUT_REVISION_HEURES = 200    # coût ajouté si trop d'heures
 FICHIER_VUES = "annonces_vues.json"
 FICHIER_HISTO = "historique_prix.json"
+# Modèles cherchés dans toute la France, 1 fois par jour, pour connaître les prix du marché
+MODELES_REF = ["ktm 85", "ktm 125", "ktm 250", "ktm 450", "yz 85", "yz 125", "yz 250",
+               "yz 450", "crf 250", "crf 450", "kx 85", "kx 250", "kx 450", "rmz 250",
+               "rmz 450", "husqvarna tc 85", "husqvarna tc 125", "husqvarna fc 250",
+               "husqvarna fc 450", "gasgas mc 85", "gasgas mc 125", "gasgas mc 250",
+               "beta 250", "sherco 250", "raptor 700", "raptor 350", "banshee",
+               "yfz 450", "ltz 400", "ltr 450", "trx 450", "kfx 450"]
 FICHIER_SITE = "annonces.json"
 # ============================
 
@@ -99,6 +106,34 @@ def trouver_annee(ad, texte):
     return None
 
 
+def memoriser(histo, mod, ad_id, prix, annee):
+    m = histo["modeles"].setdefault(mod, {})
+    m[ad_id] = [prix, annee]
+    while len(m) > 300:                    # on garde les 300 dernières par modèle
+        m.pop(next(iter(m)))
+
+
+def maj_prix_marche(client, histo):
+    """1 fois par jour : cherche chaque modèle dans toute la France."""
+    total = 0
+    for q in MODELES_REF:
+        try:
+            params = dict(text=q, limit=35, ad_type=lbc.AdType.OFFER, price=[200, 15000])
+            if CAT:
+                params["category"] = CAT
+            for ad in client.search(**params).ads:
+                texte = ((ad.subject or "") + " " + (getattr(ad, "body", "") or "")).lower()
+                mod, annee = modele(texte), trouver_annee(ad, texte)
+                if ad.price and mod and annee and not any(m in texte for m in MOTS_EXCLUS):
+                    memoriser(histo, mod, str(getattr(ad, "id", ad.url)), int(ad.price), annee)
+                    total += 1
+        except Exception as e:
+            print("Erreur prix marché", q, ":", e)
+        time.sleep(random.uniform(3, 6))   # pause pour ne pas se faire bloquer
+    histo["_maj"] = datetime.now().strftime("%Y-%m-%d")
+    print(f"Prix du marché mis à jour : {total} annonces de référence")
+
+
 def analyser(ad, histo):
     titre = ad.subject or ""
     texte = (titre + " " + (getattr(ad, "body", "") or "")).lower()
@@ -110,10 +145,11 @@ def analyser(ad, histo):
         return None                        # sans modèle ni année, on ne peut pas comparer
     prix = int(ad.price)
 
-    # prix des motos du même modèle, à ±2 ans, déjà vues
-    comparables = [p for p, a in histo.get(mod, []) if abs(a - annee) <= ECART_ANNEES]
-    histo.setdefault(mod, []).append([prix, annee])
-    histo[mod] = histo[mod][-150:]
+    # prix des motos du même modèle, à ±2 ans (hors cette annonce)
+    ad_id = str(getattr(ad, "id", ad.url))
+    comparables = [p for i, (p, a) in histo["modeles"].get(mod, {}).items()
+                   if i != ad_id and abs(a - annee) <= ECART_ANNEES]
+    memoriser(histo, mod, ad_id, prix, annee)
     if len(comparables) < MIN_ECHANTILLONS:
         return None                        # pas assez de données pour estimer
 
@@ -152,10 +188,12 @@ def envoyer_discord(a):
 
 
 def passage(client, vues, histo, site, init=False):
+    if histo.get("_maj") != datetime.now().strftime("%Y-%m-%d"):
+        maj_prix_marche(client, histo)
     ads = []
-    for recherche in RECHERCHES:
+    for recherche, prix_max in RECHERCHES.items():
         params = dict(text=recherche, locations=[VILLE], limit=35, sort=lbc.Sort.NEWEST,
-                      ad_type=lbc.AdType.OFFER, price=[PRIX_MIN, PRIX_MAX])
+                      ad_type=lbc.AdType.OFFER, price=[PRIX_MIN, prix_max])
         if CAT:
             params["category"] = CAT
         ads += client.search(**params).ads
@@ -182,8 +220,8 @@ def passage(client, vues, histo, site, init=False):
 def main():
     client = lbc.Client()
     vues, histo, site = set(lire(FICHIER_VUES, [])), lire(FICHIER_HISTO, {}), lire(FICHIER_SITE, [])
-    # ancien format (prix sans année) : on le jette
-    histo = {k: v for k, v in histo.items() if v and isinstance(v[0], list)}
+    if "modeles" not in histo:             # ancien format : on repart propre
+        histo = {"modeles": {}}
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and DISCORD_WEBHOOK:
         requests.post(DISCORD_WEBHOOK, timeout=10,
                       json={"content": "✅ Bot Cross : test OK, les notifications marchent !"})
