@@ -43,7 +43,9 @@ HEURES_REVISION = 100         # au-delà, on prévoit une révision moteur
 COUT_REVISION_HEURES = 200    # coût ajouté si trop d'heures
 FICHIER_VUES = "annonces_vues.json"
 FICHIER_HISTO = "historique_prix.json"
-# Modèles cherchés dans toute la France, 1 fois par jour, pour connaître les prix du marché
+# Modèles cherchés dans toute la France pour connaître les prix du marché
+# (2 par passage, à tour de rôle, pour ne pas se faire bloquer par Leboncoin)
+MODELES_PAR_PASSAGE = 2
 MODELES_REF = ["ktm 85", "ktm 125", "ktm 250", "ktm 450", "yz 85", "yz 125", "yz 250",
                "yz 450", "crf 250", "crf 450", "kx 85", "kx 250", "kx 450", "rmz 250",
                "rmz 450", "husqvarna tc 85", "husqvarna tc 125", "husqvarna fc 250",
@@ -114,24 +116,24 @@ def memoriser(histo, mod, ad_id, prix, annee):
 
 
 def maj_prix_marche(client, histo):
-    """1 fois par jour : cherche chaque modèle dans toute la France."""
-    total = 0
-    for q in MODELES_REF:
-        try:
-            params = dict(text=q, limit=35, ad_type=lbc.AdType.OFFER, price=[200, 15000])
-            if CAT:
-                params["category"] = CAT
-            for ad in client.search(**params).ads:
-                texte = ((ad.subject or "") + " " + (getattr(ad, "body", "") or "")).lower()
-                mod, annee = modele(texte), trouver_annee(ad, texte)
-                if ad.price and mod and annee and not any(m in texte for m in MOTS_EXCLUS):
-                    memoriser(histo, mod, str(getattr(ad, "id", ad.url)), int(ad.price), annee)
-                    total += 1
-        except Exception as e:
-            print("Erreur prix marché", q, ":", e)
-        time.sleep(random.uniform(3, 6))   # pause pour ne pas se faire bloquer
-    histo["_maj"] = datetime.now().strftime("%Y-%m-%d")
-    print(f"Prix du marché mis à jour : {total} annonces de référence")
+    """Étudie 2 modèles dans toute la France (les suivants au prochain passage)."""
+    idx = histo.get("_idx", 0)
+    for _ in range(MODELES_PAR_PASSAGE):
+        q = MODELES_REF[idx % len(MODELES_REF)]
+        time.sleep(random.uniform(4, 8))   # pause pour ne pas se faire bloquer
+        params = dict(text=q, limit=35, ad_type=lbc.AdType.OFFER, price=[200, 15000])
+        if CAT:
+            params["category"] = CAT
+        total = 0
+        for ad in client.search(**params).ads:   # si bloqué : erreur -> on arrête le passage
+            texte = ((ad.subject or "") + " " + (getattr(ad, "body", "") or "")).lower()
+            mod, annee = modele(texte), trouver_annee(ad, texte)
+            if ad.price and mod and annee and not any(m in texte for m in MOTS_EXCLUS):
+                memoriser(histo, mod, str(getattr(ad, "id", ad.url)), int(ad.price), annee)
+                total += 1
+        idx += 1
+        histo["_idx"] = idx
+        print(f"Prix du marché « {q} » : {total} annonces de référence")
 
 
 def analyser(ad, histo):
@@ -188,8 +190,6 @@ def envoyer_discord(a):
 
 
 def passage(client, vues, histo, site, init=False):
-    if histo.get("_maj") != datetime.now().strftime("%Y-%m-%d"):
-        maj_prix_marche(client, histo)
     ads = []
     for recherche, prix_max in RECHERCHES.items():
         params = dict(text=recherche, locations=[VILLE], limit=35, sort=lbc.Sort.NEWEST,
@@ -210,6 +210,10 @@ def passage(client, vues, histo, site, init=False):
             nouvelles += 1
             if a["marge"] >= MARGE_DISCORD:
                 envoyer_discord(a)
+    try:
+        maj_prix_marche(client, histo)
+    except Exception as e:
+        print("Prix du marché : arrêt (", e, ")")
     del site[100:]                         # 100 annonces max sur la page
     ecrire(FICHIER_VUES, list(vues)[-2000:])
     ecrire(FICHIER_HISTO, histo)
