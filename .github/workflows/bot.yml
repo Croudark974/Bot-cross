@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install lbc requests
-      - run: python3 botcross.py --once
+      - run: python3 botcross_2.py --once
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
       - name: Sauvegarde
