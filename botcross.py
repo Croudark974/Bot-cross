@@ -36,7 +36,7 @@ REPARATIONS = {               # mot trouvé dans l'annonce -> coût estimé (€
 }
 MOTS_EXCLUS = ["pour pièces", "pour pieces", "hs", "épave", "recherche", "pit bike",
                "pocket", "quad enfant", "sans papiers"]
-MARGE_DISCORD = 150           # marge mini pour une notif Discord
+MARGE_DISCORD = 0           # marge mini pour une notif Discord
 MIN_ECHANTILLONS = 3          # nb de prix vus avant d'estimer un prix de marché
 FICHIER_VUES = "annonces_vues.json"
 FICHIER_HISTO = "historique_prix.json"
